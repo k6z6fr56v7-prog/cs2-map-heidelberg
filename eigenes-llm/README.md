@@ -51,6 +51,21 @@ Für die großen Gewichtsmatrizen nutzt das Training [Muon](https://kellerjordan
 statt AdamW, skaliert nach [Moonlight](https://arxiv.org/abs/2502.16982). Muon „verteilt“
 jeden Lernschritt gleichmäßig auf alle Richtungen einer Matrix. Bei gleicher Rechenzeit lernt
 das Modell dadurch mehr.
+
+Gemessener Vergleich: kleines Testmodell, gleiche Daten, je 1500 Schritte, Validierungs-Loss
+(kleiner = besser):
+
+| Lernrate | AdamW + Cosine (vorher) | Muon + WSD (jetzt) |
+|---|---|---|
+| 1e-3 | 2,98 | 2,70 |
+| 2e-3 | 2,81 | 2,50 |
+| 4e-3 | 2,75 | **2,46** |
+
+Bestes AdamW gegen bestes Muon: 2,75 gegen 2,46. Das entspricht einer um rund 25 % niedrigeren
+Perplexität (15,6 statt 11,7). Einschränkung: Gemessen wurde in der Cloud auf der CPU, mit
+einem Modell aus 1,5 Mio. Parametern und englischem Text. Bei größeren Modellen fällt der
+Vorsprung laut Literatur meist kleiner aus, bleibt aber deutlich.
+
 Zurück zum Klassiker: `trainieren --optimizer adamw`.
 
 ### 2. WSD-Lernratenplan: Training verlängern ohne Neustart
