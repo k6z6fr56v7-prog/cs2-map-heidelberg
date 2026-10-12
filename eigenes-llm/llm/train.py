@@ -26,6 +26,7 @@ import torch
 from .config import ModelConfig, TrainConfig
 from .generate import generate
 from .model import GPT
+from .optim import build_optimizer
 from .tokenizer import StreamDecoder, Tokenizer
 
 BatchFn = Callable[[str, int, torch.device], tuple[torch.Tensor, torch.Tensor]]
@@ -45,11 +46,31 @@ def fmt_time(s: float) -> str:
 
 
 def lr_at(progress: float, step: int, tc: TrainConfig) -> float:
+    """Lernrate. WSD = Warmup, dann konstant (Stable), am Ende Abkuehlen (Decay).
+
+    Vorteil von WSD: Der Stand vor dem Abkuehlen wird gespeichert. Von dort
+    kann man das Training spaeter beliebig verlaengern (--verlaengern).
+    Abkuehlen mit 1-sqrt-Form (Haegele et al. 2024).
+    """
     if step < tc.warmup_steps:
         return tc.lr * (step + 1) / tc.warmup_steps
     progress = min(max(progress, 0.0), 1.0)
-    cos = 0.5 * (1 + math.cos(math.pi * progress))
-    return tc.lr * (tc.min_lr_ratio + (1 - tc.min_lr_ratio) * cos)
+    lo = tc.lr * tc.min_lr_ratio
+    if tc.schedule == "cosine":
+        cos = 0.5 * (1 + math.cos(math.pi * progress))
+        return lo + (tc.lr - lo) * cos
+    start = 1.0 - tc.decay_frac
+    if progress < start:
+        return tc.lr
+    x = (progress - start) / max(tc.decay_frac, 1e-9)
+    return lo + (tc.lr - lo) * (1 - math.sqrt(x))
+
+
+def progress_at_start_beyond_stable(step: int, tc: TrainConfig, hours: Optional[float], elapsed: float) -> bool:
+    p = step / tc.max_steps
+    if hours:
+        p = max(p, elapsed / (hours * 3600))
+    return p >= 1 - tc.decay_frac
 
 
 def setup_precision(device: torch.device):
@@ -82,6 +103,7 @@ def train(
     device: torch.device,
     hours: Optional[float] = None,
     resume: bool = False,
+    extend: bool = False,
     init_weights: Optional[dict] = None,
     tokens_available: Optional[int] = None,
     run_name: str = "vortraining",
@@ -97,23 +119,48 @@ def train(
 
     model = GPT(model_cfg, dropout=tc.dropout).to(device)
     model.grad_checkpointing = tc.grad_checkpointing
-    opt = model.optimizer(tc.lr, tc.weight_decay, (tc.beta1, tc.beta2), device.type)
 
     step, elapsed_before, tokens_seen, best_val = 0, 0.0, 0, float("inf")
     ckpt_path = out_dir / "ckpt.pt"
-    if resume and ckpt_path.exists():
-        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    stable_path = out_dir / "ckpt_stabil.pt"
+    load_path = stable_path if extend else ckpt_path
+    if extend and not stable_path.exists():
+        raise SystemExit(f"{stable_path} fehlt - Verlaengern geht nur nach einem WSD-Training.")
+    ck = None
+    if (resume or extend) and load_path.exists():
+        ck = torch.load(load_path, map_location="cpu", weights_only=False)
+        saved_tc = ck.get("train_cfg", {})
+        # Optimizer und Batch so wie beim urspruenglichen Training (sonst passt der Zustand nicht)
+        tc = replace(tc, micro_batch=saved_tc.get("micro_batch", tc.micro_batch),
+                     grad_accum=saved_tc.get("grad_accum", tc.grad_accum),
+                     optimizer=saved_tc.get("optimizer", "adamw"),
+                     schedule=saved_tc.get("schedule", "cosine"),
+                     decay_frac=saved_tc.get("decay_frac", tc.decay_frac))
+    elif resume:
+        print("  Kein Checkpoint gefunden - starte neu.")
+
+    opt = build_optimizer(model, tc.optimizer, tc.lr, tc.weight_decay, (tc.beta1, tc.beta2), device.type)
+
+    if ck is not None:
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["optimizer"])
         step = ck["step"]
         elapsed_before = ck.get("elapsed", 0.0)
         tokens_seen = ck.get("tokens_seen", 0)
         best_val = ck.get("best_val", float("inf"))
-        saved_tc = ck.get("train_cfg", {})
-        tc = replace(tc, micro_batch=saved_tc.get("micro_batch", tc.micro_batch),
-                     grad_accum=saved_tc.get("grad_accum", tc.grad_accum))
-        hours = ck.get("hours", hours) if hours is None else hours
-        print(f"  Setze fort bei Schritt {step} ({tokens_seen / 1e6:.1f} Mio. Tokens gesehen)")
+        saved_hours = ck.get("hours")
+        saved_steps = ck.get("train_cfg", {}).get("max_steps", tc.max_steps)
+        if extend:
+            # Ohne neue Vorgabe: Gesamtdauer verdoppeln
+            if saved_hours and not hours:
+                hours = saved_hours * 2
+            if not saved_hours and tc.max_steps <= saved_steps:
+                tc = replace(tc, max_steps=saved_steps * 2)
+            ziel = f"{hours:g} Stunden insgesamt" if hours else f"{tc.max_steps:,} Schritte insgesamt"
+            print(f"  Verlaengere ab Schritt {step} (Stand vor dem Abkuehlen), neues Ziel: {ziel}")
+        else:
+            hours = hours or saved_hours
+            print(f"  Setze fort bei Schritt {step} ({tokens_seen / 1e6:.1f} Mio. Tokens gesehen)")
     elif init_weights is not None:
         missing, unexpected = model.load_state_dict(init_weights, strict=False)
         if unexpected:
@@ -135,6 +182,7 @@ def train(
     print(f"  Modell:      {n_params / 1e6:.1f} Mio. Parameter "
           f"({raw_model.num_params(False) / 1e6:.1f} Mio. ohne Embeddings)")
     print(f"  Batch:       {tc.micro_batch} x {tc.grad_accum} x {T} = {tokens_per_step():,} Tokens pro Schritt")
+    print(f"  Optimizer:   {tc.optimizer}, Lernrate {tc.lr:g}, Plan {tc.schedule}")
     if hours:
         print(f"  Zeitbudget:  {hours:g} Stunden (oder max. {tc.max_steps:,} Schritte)")
     else:
@@ -163,7 +211,7 @@ def train(
 
     old_handler = signal.signal(signal.SIGINT, on_sigint)
 
-    def checkpoint(final: bool = False) -> None:
+    def checkpoint(final: bool = False, path: Optional[Path] = None) -> None:
         state = {
             "model": raw_model.state_dict(),
             "optimizer": opt.state_dict(),
@@ -176,7 +224,7 @@ def train(
             "hours": hours,
             "run": run_name,
         }
-        save_atomic(state, ckpt_path)
+        save_atomic(state, path or ckpt_path)
         if final:
             export_weights(out_dir / "modell.pt")
 
@@ -212,6 +260,8 @@ def train(
     tokens_at_log = tokens_seen
     loss_acc, loss_n = 0.0, 0
     oom_retries = 0
+    stable_saved = extend or (tc.schedule == "wsd" and progress_at_start_beyond_stable(step, tc, hours,
+                                                                                      elapsed_before))
 
     def progress() -> float:
         p = step / tc.max_steps
@@ -259,6 +309,10 @@ def train(
             step += 1
             tokens_seen += tokens_per_step()
             loss_n += 1
+            if tc.schedule == "wsd" and not stable_saved and progress() >= 1 - tc.decay_frac:
+                stable_saved = True
+                checkpoint(path=stable_path)
+                print("  -- Stand vor dem Abkuehlen gesichert (ckpt_stabil.pt, fuer --verlaengern)")
 
             if step % tc.log_every == 0:
                 now = time.time()

@@ -325,3 +325,169 @@ def test_jinja_template_matches_training_format():
     msgs = [{"role": "system", "content": "Sei nett."}, {"role": "user", "content": "Wo liegt Heidelberg?"},
             {"role": "assistant", "content": "Am Neckar."}, {"role": "user", "content": "Und Köln?"}]
     assert jinja2.Template(CHAT_TEMPLATE).render(messages=msgs) == render_chat(msgs)
+
+
+# ------------------------------------------------------------------ Lehrer (Ollama-Destillation)
+
+
+@pytest.fixture()
+def fake_ollama():
+    """Ein Mini-Server, der sich wie Ollama verhaelt (ohne echtes Modell)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    calls = {"chat": 0, "think_rejected": 0}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._send(200, {"models": [{"name": "eigen-lm:latest"}, {"name": "qwen3.5:9b"}]})
+
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "think" in req:  # simuliert eine aeltere Ollama-Version
+                calls["think_rejected"] += 1
+                self._send(400, {"error": "unknown field think"})
+                return
+            calls["chat"] += 1
+            n = calls["chat"]
+            prompt = req["messages"][1]["content"]
+            thema = prompt.split("'")[1]
+            if n % 4 == 0:  # jede vierte Antwort ist Englisch und muss verworfen werden
+                content = json.dumps({"frage": "What is this?", "antwort": "This is the answer and it is for you."})
+            else:
+                content = "<think>hmm</think>" + json.dumps({
+                    "frage": f"Was ist eigentlich {thema}? (Nr. {n})",
+                    "antwort": f"Das ist eine kurze Erklärung zu {thema}. Es ist nicht schwer, und die Idee "
+                               f"ist auch für Kinder gut zu verstehen."})
+            self._send(200, {"message": {"role": "assistant", "content": content}})
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", calls
+    srv.shutdown()
+
+
+def test_lehrer_generates_filters_and_resumes(fake_ollama, tmp_path):
+    from llm.lehrer import pick_model, run
+
+    url, calls = fake_ollama
+    assert pick_model(None, url) == "qwen3.5:9b"  # bevorzugt Qwen, nie das eigene Modell
+    out = tmp_path / "lehrer.jsonl"
+    assert run(out, anzahl=6, url=url) == 6
+    rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 6
+    assert all("<think>" not in r["messages"][1]["content"] for r in rows)
+    assert all("What" not in r["messages"][0]["content"] for r in rows)
+    assert calls["think_rejected"] > 0  # Fallback fuer alte Ollama-Versionen wurde genutzt
+    # Fortsetzen: keine Aufgabe doppelt
+    run(out, anzahl=4, url=url)
+    ids = [json.loads(l)["id"] for l in out.read_text(encoding="utf-8").splitlines()]
+    assert len(ids) == 10 and len(set(ids)) == 10
+
+
+def test_sft_repeats_without_val_leak(tok, tmp_path):
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    for path, prefix in ((a, "A"), (b, "B")):
+        with path.open("w", encoding="utf-8") as f:
+            for i in range(50):
+                f.write(json.dumps({"instruction": f"{prefix} Frage {i}", "output": f"{prefix} Antwort {i}"}) + "\n")
+    prepare([str(a), str(b)], tok, 64, tmp_path / "d.pt", identity_repeat=0, repeats={str(b): 3})
+    d = torch.load(tmp_path / "d.pt", weights_only=False)
+    train_set = {tuple(i) for i, _ in d["train"]}
+    assert not any(tuple(i) in train_set for i, _ in d["val"])
+    assert len(d["train"]) > 150
+
+
+def test_benchmark_items_are_well_formed():
+    from llm.bewertung import load_items
+
+    items = load_items()
+    assert len(items) >= 100
+    for it in items:
+        assert 0 <= it["richtig"] < len(it["optionen"]) and len(set(it["optionen"])) == len(it["optionen"])
+
+
+def test_benchmark_runs_and_prefers_learned_facts(trained):
+    """Das Testmodell hat 'Heidelberg ... am Neckar' gelernt - das muss der Test erkennen."""
+    from llm.bewertung import evaluate_model, multiple_choice, report
+
+    model, tok, _ = load_model(trained, torch.device("cpu"))
+    items = [{"kategorie": "Wissen", "kontext": "Heidelberg ist eine Stadt in Baden-Württemberg. Die Stadt liegt am",
+              "optionen": [" Neckar.", " Rhein.", " Main."], "richtig": 0}]
+    assert multiple_choice(model, tok, items)["gesamt"]["quote"] == 1.0
+    res = evaluate_model(model, tok, trained)
+    assert (trained / "bewertung.json").exists()
+    assert "Deutsch-Test" in report(res["test"])
+
+
+def test_mixed_sources_respect_weights(tmp_path):
+    from llm.data import text_stream
+
+    for name, word in (("a", "Apfel"), ("b", "Birne")):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "t.txt").write_text("\n\n".join(f"{word} {i} " * 50 for i in range(4000)), encoding="utf-8")
+    docs = []
+    for i, t in enumerate(text_stream(f"{tmp_path / 'a'}:3+{tmp_path / 'b'}:1")):
+        docs.append(t)
+        if i > 40:
+            break
+    a = sum(len(t) for t in docs if "Apfel" in t)
+    b = sum(len(t) for t in docs if "Birne" in t)
+    assert 2.0 < a / b < 4.5
+
+
+# ------------------------------------------------------------------ Muon / WSD
+
+
+def test_newton_schulz_orthogonalizes():
+    from llm.optim import newton_schulz
+
+    torch.manual_seed(0)
+    G = torch.randn(64, 32)
+    X = newton_schulz(G)
+    s = torch.linalg.svdvals(X)
+    assert s.min() > 0.5 and s.max() < 1.5  # alle Richtungen etwa gleich stark
+
+
+def test_optimizer_groups_cover_all_params_once():
+    from llm.optim import build_optimizer
+
+    m = GPT(TINY)
+    opt = build_optimizer(m, "muon", 1e-3, 0.1, (0.9, 0.95), "cpu")
+    ids = [id(p) for g in opt.param_groups for p in g["params"]]
+    assert len(ids) == len(set(ids)) == len({id(p) for p in m.parameters()})
+    muon = [g for g in opt.param_groups if g["use_muon"]][0]["params"]
+    assert all(p.dim() == 2 for p in muon) and m.model.embed_tokens.weight not in muon
+
+
+def test_wsd_schedule():
+    from llm.train import lr_at
+
+    tc = TrainConfig(lr=1.0, warmup_steps=10, schedule="wsd", decay_frac=0.2, min_lr_ratio=0.0)
+    assert lr_at(0.0, 0, tc) == pytest.approx(0.1)
+    assert lr_at(0.5, 500, tc) == 1.0 and lr_at(0.79, 790, tc) == 1.0
+    assert 0 < lr_at(0.9, 900, tc) < 1.0 and lr_at(1.0, 1000, tc) == pytest.approx(0.0)
+
+
+def test_extend_from_stable_checkpoint(work, trained):
+    assert (trained / "ckpt_stabil.pt").exists()
+    stable = torch.load(trained / "ckpt_stabil.pt", weights_only=False)
+    cfg = ModelConfig.from_dict(stable["model_cfg"])
+    tc = TrainConfig(**stable["train_cfg"])
+    data = TokenData(work, cfg.max_seq_len)
+    train(cfg, tc, data.batch, trained, trained / "tokenizer.model", torch.device("cpu"), extend=True)
+    ck = torch.load(trained / "ckpt.pt", weights_only=False)
+    assert ck["step"] == 2 * stable["train_cfg"]["max_steps"]

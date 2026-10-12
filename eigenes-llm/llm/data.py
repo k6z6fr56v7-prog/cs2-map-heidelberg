@@ -75,7 +75,32 @@ def _local_stream(folder: Path) -> Iterator[str]:
                 yield "\n\n".join(chunk)
 
 
+def _mix_stream(spec: str) -> Iterator[str]:
+    """Mischt mehrere Quellen, z.B. 'fineweb2:7+wikipedia:3' (Anteile nach Zeichen)."""
+    parts = []
+    for item in spec.split("+"):
+        name, _, w = item.partition(":")
+        parts.append((name.strip(), float(w) if w else 1.0))
+    streams = [text_stream(name) for name, _ in parts]
+    weights = [w for _, w in parts]
+    chars = [0.0] * len(parts)
+    rng = random.Random(0)
+    active = list(range(len(parts)))
+    while active:
+        # Quelle waehlen, die am weitesten hinter ihrem Soll-Anteil liegt (mit etwas Zufall)
+        i = min(active, key=lambda j: chars[j] / weights[j] + rng.random() * 1e-3)
+        try:
+            text = next(streams[i])
+        except StopIteration:
+            active.remove(i)
+            continue
+        chars[i] += len(text)
+        yield text
+
+
 def text_stream(source: str) -> Iterator[str]:
+    if "+" in source:
+        return _mix_stream(source)
     if source in QUELLEN:
         return _hf_stream(source)
     path = Path(source)

@@ -105,11 +105,15 @@ def prepare(
     max_chars: int = 6000,
     name: str = "Eigen-LM",
     ersteller: str = "Leo",
+    repeats: Optional[dict[str, int]] = None,
 ) -> dict:
+    """repeats: wie oft die Beispiele einer Quelle ins Training eingehen (z.B. Lehrer-Daten 3x)."""
     examples: list[tuple[list[int], list[int]]] = []
+    weights: list[int] = []
     skipped = 0
     for src in sources:
         n_src = 0
+        rep = (repeats or {}).get(src, 1)
         for row in iter_rows(src):
             msgs = normalize(row)
             if not msgs or sum(len(m["content"]) for m in msgs) > max_chars:
@@ -120,16 +124,19 @@ def prepare(
                 skipped += 1
                 continue
             examples.append(res)
+            weights.append(rep)
             n_src += 1
             if max_examples and n_src >= max_examples:
                 break
-        print(f"  {src}: {n_src:,} Beispiele")
+        print(f"  {src}: {n_src:,} Beispiele" + (f" (x{rep})" if rep > 1 else ""))
     # Validierung nur aus echten Datensatz-Beispielen (die wiederholten
     # Identitaets-Beispiele wuerden sonst auch in der Validierung landen)
     rng = random.Random(0)
-    rng.shuffle(examples)
+    order = list(range(len(examples)))
+    rng.shuffle(order)
     n_val = min(500, len(examples) // 50) if len(examples) >= 10 else 0
-    val, examples = examples[:n_val], examples[n_val:]
+    val = [examples[i] for i in order[:n_val]]
+    examples = [examples[i] for i in order[n_val:] for _ in range(weights[i])]
     if identity_repeat and IDENTITAET.exists():
         ident = []
         for row in iter_rows(str(IDENTITAET)):

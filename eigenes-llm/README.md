@@ -25,12 +25,15 @@ Einfach nacheinander doppelklicken:
 | Datei | Was passiert | Dauer (RTX 3050) |
 |---|---|---|
 | `1_installieren.bat` | Python-Umgebung, PyTorch mit CUDA, Pakete | 5–15 min |
-| `2_daten_vorbereiten.bat` | ~2,6 GB deutschen Text laden, Tokenizer trainieren, tokenisieren | 30–90 min |
+| `2_daten_vorbereiten.bat` | ~2,6 GB deutschen Text laden (70 % Web, 30 % Wikipedia), Tokenizer trainieren | 30–90 min |
 | `3_trainieren.bat` | Vortraining des Modells (Preset „klein“, 8 Stunden) | 8 h (über Nacht) |
+| `4a_lehrer_ueber_nacht.bat` | *optional, sehr empfohlen:* dein Qwen in Ollama schreibt Chat-Beispiele | 8 h (zweite Nacht) |
 | `4_chat_training.bat` | Chat-Training: Modell lernt, auf Fragen zu antworten | 1–2 h |
 | `5_chatten.bat` | Chatten im Terminal | – |
 | `6_chat_im_browser.bat` | Chatten im Browser unter http://localhost:8800 | – |
 | `7_export_ollama.bat` | Export als GGUF, Einrichtung in Ollama | 2 min |
+| `8_bewerten.bat` | Deutsch-Test: Grammatik, Wissen, Logik in Prozent | 1 min |
+| `3c_training_verlaengern.bat` | Fertiges Training um eine weitere Nacht verlängern | 8 h |
 
 **Voraussetzungen:** Python 3.12–3.14 ([python.org](https://www.python.org/downloads/), beim
 Installieren „Add python.exe to PATH“ anhaken), aktueller NVIDIA-Treiber, ca. 10 GB freier
@@ -38,6 +41,47 @@ Speicher. Für den Export zusätzlich [Git](https://git-scm.com/download/win).
 
 **Tipp:** Leg den Ordner auf ein Laufwerk mit Platz (z. B. `D:\eigenes-llm`). Während des
 Trainings sollten CS2, Ollama und LM Studio geschlossen sein, weil sie Grafikspeicher brauchen.
+
+---
+
+## Turbo: was das Modell besser macht
+
+### 1. Muon-Optimizer (Standard)
+Für die großen Gewichtsmatrizen nutzt das Training [Muon](https://kellerjordan.github.io/posts/muon/)
+statt AdamW, skaliert nach [Moonlight](https://arxiv.org/abs/2502.16982). Muon „verteilt“
+jeden Lernschritt gleichmäßig auf alle Richtungen einer Matrix. Bei gleicher Rechenzeit lernt
+das Modell dadurch mehr.
+Zurück zum Klassiker: `trainieren --optimizer adamw`.
+
+### 2. WSD-Lernratenplan: Training verlängern ohne Neustart
+Die Lernrate bleibt lange konstant und fällt erst in den letzten 20 % ab („Abkühlen“). Kurz
+davor wird `ckpt_stabil.pt` gespeichert. Willst du nach einer Nacht weitertrainieren, setzt
+`3c_training_verlaengern.bat` genau dort an. Das Ergebnis ist so gut, als hättest du von
+Anfang an länger trainiert. Mit einem klassischen Plan (Cosine) ginge das nicht sauber.
+
+### 3. Lehrer-Modell (Destillation)
+Kleine Modelle lernen aus sauberen, kurzen, gut formulierten Beispielen viel mehr als aus
+rohem Webtext. `4a_lehrer_ueber_nacht.bat` lässt ein großes Modell in deinem Ollama (bevorzugt
+Qwen) über Nacht deutsche Fragen und Antworten zu 120 Themen schreiben, in 12 Aufgabentypen
+(Erklärungen, Anleitungen, Tipps, Vergleiche, kurze Texte, Rechenbeispiele …). Schlechte
+Antworten werden aussortiert: englisch, chinesisch, zu lang, Verweigerungen, doppelte Fragen.
+Beim Chat-Training werden diese Beispiele automatisch 3-fach gewichtet mitverwendet.
+
+- Mit Qwen 3.5 9B auf der RTX 3050 entstehen grob 300–600 Beispiele pro Stunde. Schneller
+  geht es mit einem kleineren Lehrer, z. B. `lehrer --modell qwen3.5:4b`.
+- Eigene Themen: `python -m llm lehrer --thema "Counter-Strike Maps" --thema "Heidelberg"`
+- Lehrer und Training nicht gleichzeitig laufen lassen, beide brauchen die Grafikkarte.
+
+### 4. Deutsch-Test
+116 Aufgaben zu Grammatik, Wissen und Logik, zum Beispiel: *„Heidelberg liegt am … Neckar / Main /
+Rhein / Elbe“*. Das Modell wählt die Fortsetzung, die es für am wahrscheinlichsten hält. Das
+geht auch schon beim reinen Textmodell. Der Test läuft nach jedem Training automatisch, und
+`8_bewerten.bat` vergleicht mehrere Modelle nebeneinander. So siehst du in Zahlen, ob eine
+Änderung etwas gebracht hat. Daneben steht immer, wie viel man durch Raten treffen würde.
+
+### 5. Datenmix
+Standard: 70 % FineWeb-2 (Webtext, natürliche Sprache) und 30 % Wikipedia (Fakten). Eigene
+Mischungen gehen auch, z. B. `--quelle fineweb2:5+wikipedia:3+D:\meine_texte:2`.
 
 ---
 
@@ -102,12 +146,15 @@ Mit aktivierter Umgebung (`.venv\Scripts\activate`) oder über `.venv\Scripts\py
 
 ```powershell
 python -m llm info                                   # GPU-Check
-python -m llm vorbereiten --quelle fineweb2 --preset klein
+python -m llm vorbereiten --preset klein                           # 70 % Web + 30 % Wikipedia
 python -m llm vorbereiten --quelle wikipedia --preset klein
 python -m llm vorbereiten --quelle D:\meine_texte --preset mini   # eigene .txt-Dateien
 python -m llm trainieren --preset klein --stunden 8
 python -m llm trainieren --preset klein --weiter                # nach Abbruch fortsetzen
 python -m llm generieren --modell arbeit\modell_klein --text "Heidelberg ist"
+python -m llm trainieren --preset klein --verlaengern --stunden 16      # fertiges Training verlaengern
+python -m llm bewerten --modell arbeit\modell_klein --modell arbeit\chat_klein
+python -m llm lehrer --stunden 8                                  # Ollama schreibt Chat-Beispiele
 python -m llm sft --basis arbeit\modell_klein --name "Eigen-LM" --ersteller "Leo"
 python -m llm chat --modell arbeit\chat_klein
 python -m llm web --modell arbeit\chat_klein
@@ -156,7 +203,7 @@ gespeichert und wird automatisch erkannt.
 
 ## Was getestet ist
 
-`python -m pytest tests -q`: 21 Tests, unter anderem:
+`python -m pytest tests -q`: 28 Tests, unter anderem:
 
 - **Rechnet exakt wie Llama:** Die Ausgaben stimmen mit `LlamaForCausalLM` von Hugging
   Face überein.
@@ -164,6 +211,8 @@ gespeichert und wird automatisch erkannt.
   zerlegt den Chat-Text in genau dieselben Tokens und erzeugt denselben Text wie PyTorch.
 - **Chat-Vorlagen stimmen:** Die Ollama-Vorlage (Go) und die LM-Studio-Vorlage (Jinja)
   erzeugen genau das Format, mit dem das Modell trainiert wurde.
+- **Lehrer-Skript:** wird gegen einen nachgebauten Ollama-Server getestet, inklusive Filter
+  und Fortsetzen nach Abbruch.
 - **Technische Details:** Der KV-Cache liefert dieselben Ergebnisse wie die volle Rechnung.
   Training, Fortsetzen, Chat-Training, Umlaute und Emoji funktionieren.
 
@@ -192,11 +241,15 @@ llm/
   model.py      Transformer (Llama-Architektur)
   tokenizer.py  SentencePiece-Tokenizer + Chat-Marker
   data.py       Download, Tokenisierung, Datenlader
-  train.py      Trainingsschleife (bf16, Zeitbudget, Checkpoints, OOM-Schutz)
+  train.py      Trainingsschleife (bf16, Zeitbudget, WSD, Checkpoints, OOM-Schutz)
+  optim.py      Muon-Optimizer
+  lehrer.py     Destillation: Ollama-Modell schreibt Chat-Beispiele
+  bewertung.py  Deutsch-Test und Perplexitaet
   sft.py        Chat-Fine-Tuning
   generate.py   Sampling mit KV-Cache, Chat-Format
   web.py        Browser-Chat
   export.py     Export nach Hugging Face / GGUF / Ollama
 daten/sft/identitaet.jsonl   Wer bin ich?-Beispiele (Name und Ersteller werden eingesetzt)
+daten/test/deutsch_test.jsonl  116 Testaufgaben
 tests/                       Tests
 ```

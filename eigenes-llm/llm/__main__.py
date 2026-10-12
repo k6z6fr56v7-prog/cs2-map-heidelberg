@@ -5,6 +5,8 @@ Befehle (in der ueblichen Reihenfolge):
     vorbereiten   Text laden + Tokenizer trainieren + tokenisieren (alles in einem)
     trainieren    Vortraining des Sprachmodells
     generieren    Text fortsetzen lassen
+    bewerten      Deutsch-Test (Grammatik, Wissen, Logik), auch zum Vergleichen
+    lehrer        Ein grosses Ollama-Modell schreibt Chat-Beispiele (optional, vor sft)
     sft           Chat-Fine-Tuning (macht aus dem Textmodell einen Assistenten)
     chat          Im Terminal chatten
     web           Chat im Browser
@@ -109,7 +111,7 @@ def cmd_vorbereiten(args) -> None:
 def _apply_overrides(tc, args):
     over = {}
     for key, attr in [("micro_batch", "micro_batch"), ("akkumulation", "grad_accum"), ("lr", "lr"),
-                      ("schritte", "max_steps")]:
+                      ("schritte", "max_steps"), ("optimizer", "optimizer"), ("plan", "schedule")]:
         val = getattr(args, key, None)
         if val is not None:
             over[attr] = val
@@ -138,7 +140,9 @@ def cmd_trainieren(args) -> None:
     print(f"Vortraining '{preset.name}': {preset.beschreibung}")
     print(f"  Daten:       {meta['train_tokens'] / 1e6:,.0f} Mio. Tokens")
     train(mc, tc, data.batch, out, work / "tokenizer.model", pick_device(args.geraet), hours=args.stunden,
-          resume=args.weiter, tokens_available=meta["train_tokens"], run_name="vortraining")
+          resume=args.weiter, extend=args.verlaengern, tokens_available=meta["train_tokens"],
+          run_name="vortraining")
+    _auto_bewertung(out, work)
     print("\nAusprobieren:")
     print(f"  python -m llm generieren --modell {out} --text \"Heidelberg ist\"")
 
@@ -173,11 +177,16 @@ def cmd_sft(args) -> None:
     out = Path(args.ausgabe) if args.ausgabe else base.parent.parent / ("chat_" + base.parent.name.replace("modell_", ""))
     out.mkdir(parents=True, exist_ok=True)
     data_path = out / "sft_daten.pt"
+    lehrer = Path(args.arbeit) / "lehrer_chat.jsonl"
     if not data_path.exists() or args.neu_tokenisieren:
         sources = args.datensatz or [STANDARD_DATENSATZ]
+        if not args.datensatz and lehrer.exists():
+            print(f"  Lehrer-Beispiele gefunden: {lehrer} (werden {args.lehrer_gewicht}x verwendet)")
+            sources = sources + [str(lehrer)]
         print("Bereite Chat-Daten vor...")
         prepare(sources, tok, mc.max_seq_len, data_path, identity_repeat=args.identitaet,
-                max_examples=args.max_beispiele, name=args.name, ersteller=args.ersteller)
+                max_examples=args.max_beispiele, name=args.name, ersteller=args.ersteller,
+                repeats={str(lehrer): args.lehrer_gewicht})
     data = ChatData(data_path, pad_id=tok.eos_id)
     tokens_per_step = args.micro_batch * args.akkumulation * mc.max_seq_len
     steps = args.schritte or max(200, int(args.epochen * data.train_tokens / (tokens_per_step * 0.5)))
@@ -187,8 +196,54 @@ def cmd_sft(args) -> None:
     print(f"Chat-Fine-Tuning: {len(data.train):,} Beispiele, {steps:,} Schritte")
     train(mc, tc, data.batch, out, tok_path, pick_device(args.geraet), resume=args.weiter,
           init_weights=None if args.weiter else ck["model"], run_name="sft")
+    _auto_bewertung(out, Path(args.arbeit))
     print("\nJetzt chatten:")
     print(f"  python -m llm chat --modell {out}")
+
+
+def cmd_bewerten(args) -> None:
+    from .bewertung import evaluate_model, report
+    from .generate import find_checkpoint, load_model, pick_device
+
+    device = pick_device(args.geraet)
+    val = Path(args.arbeit) / "val.bin"
+    rows = []
+    for m in args.modell:
+        model, tok, _ = load_model(Path(m), device)
+        out_dir = find_checkpoint(Path(m)).parent
+        res = evaluate_model(model, tok, out_dir, val if val.exists() and not args.ohne_perplexitaet else None)
+        print(report(res["test"], res["perplexitaet"], f"- {m}"))
+        print()
+        rows.append((m, res))
+    if len(rows) > 1:
+        print("  Vergleich (Gesamtquote):")
+        for m, res in sorted(rows, key=lambda r: -r[1]["test"]["gesamt"]["quote"]):
+            ppl = res["perplexitaet"]
+            print(f"    {res['test']['gesamt']['quote'] * 100:5.1f} %  {'' if ppl is None else f'PPL {ppl:7.1f}  '}{m}")
+
+
+def _auto_bewertung(out: Path, work: Path) -> None:
+    try:
+        from .bewertung import evaluate_model, report
+        from .generate import load_model, pick_device
+
+        model, tok, _ = load_model(out, pick_device())
+        val = work / "val.bin"
+        res = evaluate_model(model, tok, out, val if val.exists() else None)
+        print()
+        print(report(res["test"], res["perplexitaet"]))
+    except Exception as e:  # Bewertung soll nie ein fertiges Training kaputt machen
+        print(f"  (Deutsch-Test uebersprungen: {e})")
+
+
+def cmd_lehrer(args) -> None:
+    from .lehrer import run
+
+    out = Path(args.ausgabe) if args.ausgabe else Path(args.arbeit) / "lehrer_chat.jsonl"
+    print("Lehrer-Modell schreibt Chat-Beispiele fuer dein Modell")
+    run(out, model=args.modell, anzahl=args.anzahl, hours=args.stunden, url=args.url,
+        extra_themen=args.thema)
+    print("\nDiese Beispiele werden beim naechsten 'sft' automatisch mitverwendet.")
 
 
 def cmd_chat(args) -> None:
@@ -285,8 +340,9 @@ def build_parser() -> argparse.ArgumentParser:
                             ("tokenizer", cmd_tokenizer, "Nur Tokenizer trainieren"),
                             ("tokenisieren", cmd_tokenisieren, "Nur tokenisieren")]:
         sp = sub.add_parser(name, help=hilfe)
-        sp.add_argument("--quelle", default="fineweb2",
-                        help=f"{' / '.join(QUELLEN)} oder Pfad zu einem Ordner mit .txt-Dateien")
+        sp.add_argument("--quelle", default="fineweb2:7+wikipedia:3",
+                        help=f"{' / '.join(QUELLEN)}, ein Ordner mit .txt-Dateien oder eine Mischung wie "
+                             "'fineweb2:7+wikipedia:3' (Standard)")
         sp.add_argument("--preset", default="klein", choices=list(PRESETS))
         sp.add_argument("--tokens", type=int, default=None, help="Wie viele Tokens laden (Standard: je nach Preset)")
         sp.add_argument("--vocab", type=int, default=16000)
@@ -297,6 +353,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--preset", default="klein", choices=list(PRESETS))
     sp.add_argument("--stunden", type=float, default=None, help="Zeitbudget, z.B. 6")
     sp.add_argument("--weiter", action="store_true", help="Vom letzten Checkpoint fortsetzen")
+    sp.add_argument("--verlaengern", action="store_true",
+                    help="Fertiges Training verlaengern (ab dem Stand vor dem Abkuehlen); "
+                         "mit --stunden = neue Gesamtzeit, sonst doppelt so lang")
+    sp.add_argument("--optimizer", choices=["muon", "adamw"], default=None)
+    sp.add_argument("--plan", choices=["wsd", "cosine"], default=None, help="Lernraten-Plan")
     sp.add_argument("--ausgabe", default=None)
     sp.add_argument("--micro-batch", dest="micro_batch", type=int)
     sp.add_argument("--akkumulation", type=int)
@@ -329,8 +390,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--akkumulation", type=int, default=2)
     sp.add_argument("--weiter", action="store_true")
     sp.add_argument("--neu-tokenisieren", dest="neu_tokenisieren", action="store_true")
+    sp.add_argument("--lehrer-gewicht", dest="lehrer_gewicht", type=int, default=3,
+                    help="Wie oft die Lehrer-Beispiele (arbeit/lehrer_chat.jsonl) einfliessen")
     sp.add_argument("--geraet", default=None)
     sp.set_defaults(fn=cmd_sft)
+
+    sp = sub.add_parser("bewerten", help="Deutsch-Test: Modelle vergleichen")
+    sp.add_argument("--modell", action="append", required=True, help="Modellordner (mehrfach fuer Vergleich)")
+    sp.add_argument("--ohne-perplexitaet", dest="ohne_perplexitaet", action="store_true")
+    sp.add_argument("--geraet", default=None)
+    sp.set_defaults(fn=cmd_bewerten)
+
+    sp = sub.add_parser("lehrer", help="Ollama-Modell schreibt Trainingsbeispiele (Destillation)")
+    sp.add_argument("--modell", default=None, help="Ollama-Modell, z.B. qwen3.5:9b (Standard: automatisch)")
+    sp.add_argument("--anzahl", type=int, default=None, help="Wie viele neue Beispiele")
+    sp.add_argument("--stunden", type=float, default=None, help="Zeitbudget")
+    sp.add_argument("--thema", action="append", help="Zusaetzliches Thema (mehrfach moeglich)")
+    sp.add_argument("--ausgabe", default=None)
+    sp.add_argument("--url", default="http://localhost:11434")
+    sp.set_defaults(fn=cmd_lehrer)
 
     sp = sub.add_parser("chat", help="Chat im Terminal")
     sp.add_argument("--modell", required=True)

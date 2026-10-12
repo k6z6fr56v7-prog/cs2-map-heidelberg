@@ -54,7 +54,10 @@ class TrainConfig:
     micro_batch: int = 16
     grad_accum: int = 4
     lr: float = 1e-3
-    min_lr_ratio: float = 0.1
+    optimizer: str = "muon"        # "muon" (schneller lernend) oder "adamw" (klassisch)
+    schedule: str = "wsd"          # "wsd" (verlaengerbar) oder "cosine"
+    decay_frac: float = 0.2        # WSD: Anteil am Ende, in dem die Lernrate abfaellt
+    min_lr_ratio: float = 0.0
     warmup_steps: int = 200
     max_steps: int = 10000
     weight_decay: float = 0.1
