@@ -1,0 +1,11 @@
+# PyTorch mit CUDA wird von installieren.ps1 separat installiert
+# (von download.pytorch.org, weil die Windows-Version auf PyPI nur die CPU nutzt).
+numpy>=1.26
+sentencepiece>=0.2.0
+datasets>=3.0
+safetensors>=0.4
+# fuer den Export nach GGUF (llama.cpp-Konverter) und die Tests
+transformers>=4.45
+protobuf>=4.21
+jinja2>=3.1
+pytest>=8
