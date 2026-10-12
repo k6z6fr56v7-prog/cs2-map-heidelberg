@@ -470,7 +470,7 @@ def test_optimizer_groups_cover_all_params_once():
     ids = [id(p) for g in opt.param_groups for p in g["params"]]
     assert len(ids) == len(set(ids)) == len({id(p) for p in m.parameters()})
     muon = [g for g in opt.param_groups if g["use_muon"]][0]["params"]
-    assert all(p.dim() == 2 for p in muon) and m.model.embed_tokens.weight not in muon
+    assert all(p.dim() == 2 for p in muon) and id(m.model.embed_tokens.weight) not in {id(p) for p in muon}
 
 
 def test_wsd_schedule():

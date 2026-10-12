@@ -203,7 +203,7 @@ gespeichert und wird automatisch erkannt.
 
 ## Was getestet ist
 
-`python -m pytest tests -q`: 28 Tests, unter anderem:
+`python -m pytest tests -q`: 30 Tests, unter anderem:
 
 - **Rechnet exakt wie Llama:** Die Ausgaben stimmen mit `LlamaForCausalLM` von Hugging
   Face überein.
