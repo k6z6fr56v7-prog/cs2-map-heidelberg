@@ -34,6 +34,16 @@ Einfach nacheinander doppelklicken:
 | `7_export_ollama.bat` | Export als GGUF, Einrichtung in Ollama | 2 min |
 | `8_bewerten.bat` | Deutsch-Test: Grammatik, Wissen, Logik in Prozent | 1 min |
 | `3c_training_verlaengern.bat` | Fertiges Training um eine weitere Nacht verlängern | 8 h |
+| `9_dashboard.bat` | Live-Fortschritt im Browser, auch vom Handy (neben dem Training starten) | – |
+| `2b_tokenizer_neu.bat` | Tokenizer neu trainieren und neu tokenisieren, ohne neuen Download | 15–30 min |
+
+**Hattest du Schritt 2 mit einer älteren Version gemacht?** Dann einmal `2b_tokenizer_neu.bat`
+ausführen. Ältere Versionen haben unter Windows Zeilenend-Zeichen in den Tokenizer gelernt.
+
+**Über Nacht:** Training und Lehrer verhindern selbst, dass Windows in den Energiesparmodus
+geht. Ein automatischer Neustart durch Windows-Update kann trotzdem passieren
+(*Einstellungen → Windows Update → Updates aussetzen*). Falls doch: `3b_weitertrainieren.bat`
+setzt am letzten Speicherpunkt fort.
 
 **Voraussetzungen:** Python 3.12–3.14 ([python.org](https://www.python.org/downloads/), beim
 Installieren „Add python.exe to PATH“ anhaken), aktueller NVIDIA-Treiber, ca. 10 GB freier
@@ -218,7 +228,7 @@ gespeichert und wird automatisch erkannt.
 
 ## Was getestet ist
 
-`python -m pytest tests -q`: 30 Tests, unter anderem:
+`python -m pytest tests -q`: 33 Tests, unter anderem:
 
 - **Rechnet exakt wie Llama:** Die Ausgaben stimmen mit `LlamaForCausalLM` von Hugging
   Face überein.
