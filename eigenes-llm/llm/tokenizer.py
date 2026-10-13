@@ -34,6 +34,8 @@ def train_tokenizer(
     files = [str(p) for p in text_files]
     if not files:
         raise FileNotFoundError("Keine Textdateien fuer das Tokenizer-Training gefunden.")
+    for f in files:
+        strip_carriage_returns(Path(f))
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
     try:
         _train(files, out_prefix, vocab_size, max_sentences, threads)
@@ -46,6 +48,21 @@ def train_tokenizer(
         print(f"  Hinweis: zu wenig Text fuer {vocab_size} Tokens - verwende {smaller}.")
         _train(files, out_prefix, smaller, max_sentences, threads)
     return out_prefix.with_suffix(".model")
+
+
+def strip_carriage_returns(path: Path) -> None:
+    """Windows-Zeilenenden (\\r\\n) entfernen. SentencePiece wuerde das \\r sonst als Teil
+    jeder Zeile lernen und Tokens wie '.\\r' bilden, die im Training nie vorkommen."""
+    with path.open("rb") as f:
+        head = f.read(1 << 20)
+    if b"\r" not in head:
+        return
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with path.open("rb") as src, tmp.open("wb") as dst:
+        while chunk := src.read(1 << 24):
+            dst.write(chunk.replace(b"\r", b""))
+    tmp.replace(path)
+    print("  Hinweis: Windows-Zeilenenden in der Tokenizer-Stichprobe entfernt.")
 
 
 def _train(files: list[str], out_prefix: Path, vocab_size: int, max_sentences: int, threads: int) -> None:

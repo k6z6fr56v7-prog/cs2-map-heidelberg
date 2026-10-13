@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import json
 import math
 import os
 import shutil
@@ -27,6 +28,7 @@ from .config import ModelConfig, TrainConfig
 from .generate import generate
 from .model import GPT
 from .optim import build_optimizer
+from .system import wach_bleiben
 from .tokenizer import StreamDecoder, Tokenizer
 
 BatchFn = Callable[[str, int, torch.device], tuple[torch.Tensor, torch.Tensor]]
@@ -71,6 +73,39 @@ def progress_at_start_beyond_stable(step: int, tc: TrainConfig, hours: Optional[
     if hours:
         p = max(p, elapsed / (hours * 3600))
     return p >= 1 - tc.decay_frac
+
+
+def probe_micro_batch(model, opt, tc: TrainConfig, seq_len: int, vocab: int, autocast, device) -> TrainConfig:
+    """Probiert vor dem Training, ob der Micro-Batch in den Grafikspeicher passt.
+
+    Passt er nicht, wird er halbiert und die Akkumulation verdoppelt, sodass die
+    effektive Batchgroesse (und damit das Training) gleich bleibt.
+    """
+    mb, accum = tc.micro_batch, tc.grad_accum
+    while True:
+        x = loss = None
+        try:
+            x = torch.randint(0, vocab, (mb, seq_len), device=device)
+            with autocast:
+                _, loss, _ = model(x, x)
+            loss.backward()
+            opt.zero_grad(set_to_none=True)
+            peak = torch.cuda.max_memory_allocated(device) / 2**30
+            total = torch.cuda.get_device_properties(device).total_memory / 2**30
+            print(f"  Speichertest: Micro-Batch {mb} passt ({peak:.1f} von {total:.1f} GB belegt)")
+            break
+        except torch.cuda.OutOfMemoryError:
+            opt.zero_grad(set_to_none=True)
+            x = loss = None  # Graph freigeben, sonst bleibt der Speicher belegt
+            torch.cuda.empty_cache()
+            if mb == 1:
+                raise SystemExit("Grafikspeicher reicht nicht - kleineres Preset oder --kontext 256 waehlen.")
+            mb //= 2
+            accum *= 2
+            print(f"  Speichertest: zu gross, versuche Micro-Batch {mb} (Akkumulation {accum})")
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)
+    return replace(tc, micro_batch=mb, grad_accum=accum)
 
 
 def setup_precision(device: torch.device):
@@ -154,7 +189,10 @@ def train(
             # Ohne neue Vorgabe: Gesamtdauer verdoppeln
             if saved_hours and not hours:
                 hours = saved_hours * 2
-            if not saved_hours and tc.max_steps <= saved_steps:
+            if hours:
+                # Die Zeit bestimmt das Ende - die Schrittgrenze darf nicht vorher bremsen
+                tc = replace(tc, max_steps=10**9)
+            elif tc.max_steps <= saved_steps:
                 tc = replace(tc, max_steps=saved_steps * 2)
             ziel = f"{hours:g} Stunden insgesamt" if hours else f"{tc.max_steps:,} Schritte insgesamt"
             print(f"  Verlaengere ab Schritt {step} (Stand vor dem Abkuehlen), neues Ziel: {ziel}")
@@ -195,7 +233,7 @@ def train(
         print("  Achtung: Training auf der CPU ist sehr langsam. Ist PyTorch mit CUDA installiert?")
 
     log_path = out_dir / f"{run_name}_log.csv"
-    new_log = not log_path.exists() or not resume
+    new_log = not log_path.exists() or not (resume or extend)
     log_file = log_path.open("w" if new_log else "a", newline="", encoding="utf-8")
     log = csv.writer(log_file)
     if new_log:
@@ -244,17 +282,36 @@ def train(
         model.train()
         return sum(losses) / len(losses)
 
+    status: dict = {"lauf": run_name, "ordner": out_dir.name, "log": log_path.name, "params": n_params,
+                    "stunden": hours, "max_schritte": tc.max_steps, "beispiele": [], "fertig": False}
+
+    def write_status(**kw) -> None:
+        status.update(kw, aktualisiert=time.time())
+        try:
+            tmp = out_dir / "status.json.tmp"
+            tmp.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, out_dir / "status.json")
+        except OSError:
+            pass  # z.B. Datei gerade vom Dashboard geoeffnet - naechstes Mal
+
     def show_samples() -> None:
         raw_model.eval()
+        samples = []
         for start in BEISPIEL_ANFAENGE[:2]:
             dec = StreamDecoder(tok)
             ids = generate(raw_model, tok.encode(start, bos=True), max_new_tokens=60, temperature=0.8,
                            top_k=40, stop_ids={tok.eos_id}, seed=step)
             text = "".join(dec.push(i) for i in ids).replace("\n", " ")
             print(f"    > {start}{text}")
+            samples.append(start + text)
+        write_status(beispiele=samples, beispiele_schritt=step)
         raw_model.train()
 
     model.train()
+    if device.type == "cuda":
+        tc = probe_micro_batch(model, opt, tc, T, model_cfg.vocab_size, autocast, device)
+    awake = contextlib.ExitStack()
+    awake.enter_context(wach_bleiben())
     t_start = time.time()
     t_log = time.time()
     tokens_at_log = tokens_seen
@@ -268,6 +325,9 @@ def train(
         if hours:
             p = max(p, (elapsed_before + time.time() - t_start) / (hours * 3600))
         return p
+
+    write_status(schritt=step, fortschritt=progress(), vergangen_s=elapsed_before, tokens=tokens_seen,
+                 gestartet=time.time(), micro_batch=tc.micro_batch, akkumulation=tc.grad_accum)
 
     try:
         while progress() < 1.0 and not stop_requested["flag"]:
@@ -332,6 +392,9 @@ def train(
                       f"{p * 100:5.1f} % | {fmt_time(elapsed)} vergangen, ~{fmt_time(eta)} uebrig{mem}")
                 log.writerow([step, f"{avg:.4f}", "", f"{lr:.3e}", tokens_seen, int(elapsed), int(tps)])
                 log_file.flush()
+                write_status(schritt=step, loss=avg, lr=lr, tokens_pro_s=tps, fortschritt=p, rest_s=max(eta, 0),
+                             vergangen_s=elapsed, tokens=tokens_seen, max_schritte=tc.max_steps,
+                             vram_gb=torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else None)
 
             if step % tc.eval_every == 0:
                 val = evaluate()
@@ -344,6 +407,7 @@ def train(
                       f"{'  * bestes bisher, gespeichert' if better else ''}")
                 log.writerow([step, "", f"{val:.4f}", "", tokens_seen, int(elapsed_before + time.time() - t_start), ""])
                 log_file.flush()
+                write_status(val_loss=val, bester_val_loss=best_val)
 
             if step % tc.sample_every == 0:
                 show_samples()
@@ -352,6 +416,7 @@ def train(
     finally:
         signal.signal(signal.SIGINT, old_handler)
         log_file.close()
+        awake.close()
 
     val = evaluate()
     if val < best_val:
@@ -361,6 +426,9 @@ def train(
     if val <= best_val + 1e-6:
         export_weights(out_dir / "modell.pt")
     elapsed = elapsed_before + time.time() - t_start
+    write_status(fertig=True, unterbrochen=stop_requested["flag"], schritt=step, val_loss=val,
+                 bester_val_loss=best_val, vergangen_s=elapsed, rest_s=0,
+                 fortschritt=1.0 if not stop_requested["flag"] else progress())
     print(f"\n  Fertig nach {step:,} Schritten, {fmt_time(elapsed)}. Validierungs-Loss {val:.3f} "
           f"(Perplexitaet {math.exp(min(val, 20)):.1f})")
     if stop_requested["flag"]:

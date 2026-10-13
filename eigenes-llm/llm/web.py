@@ -56,7 +56,8 @@ q.focus();
 </script></body></html>"""
 
 
-def serve(model_path: Path, port: int = 8800, system: str | None = None, name: str = "Eigen-LM") -> None:
+def serve(model_path: Path, port: int = 8800, system: str | None = None, name: str = "Eigen-LM",
+          open_browser: bool = False) -> None:
     model, tok, ckpt = load_model(model_path)
     lock = threading.Lock()
     info = f"{model.num_params() / 1e6:.1f}".replace(".", ",") + " Mio. Parameter, lokal"
@@ -103,11 +104,15 @@ def serve(model_path: Path, port: int = 8800, system: str | None = None, name: s
                              top_k=50, top_p=0.9, repetition_penalty=1.1, stop_ids={tok.eos_id, tok.user_id},
                              on_token=lambda t: send(dec.push(t)))
                 self.wfile.write(b"0\r\n\r\n")
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError:  # Browser geschlossen/neu geladen (unter Windows u.a. WinError 10053)
                 pass
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"  {name} laeuft auf http://localhost:{port}  (Beenden mit Strg+C)")
+    if open_browser:  # erst jetzt, wenn das Modell geladen ist
+        import webbrowser
+
+        webbrowser.open(f"http://localhost:{port}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

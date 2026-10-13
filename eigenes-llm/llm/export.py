@@ -131,6 +131,9 @@ def ensure_llama_cpp(path: Optional[Path]) -> Path:
     target = path or Path("werkzeuge") / "llama.cpp"
     if (target / "convert_hf_to_gguf.py").exists():
         return target
+    if not shutil.which("git"):
+        raise SystemExit("Fuer den Export wird Git gebraucht: https://git-scm.com/download/win installieren, "
+                         "danach das Fenster neu oeffnen und den Export erneut starten.")
     print(f"  Lade llama.cpp nach {target} (nur das Konvertierungsskript wird gebraucht)...")
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "clone", "--depth", "1", LLAMA_CPP_REPO, str(target)], check=True)

@@ -117,9 +117,9 @@ def download(source: str, work: Path, max_chars: int, sample_chars: int = 300_00
         old.unlink()
 
     sample_path = work / "tokenizer_stichprobe.txt"
-    sample = sample_path.open("w", encoding="utf-8")
+    sample = sample_path.open("w", encoding="utf-8", newline="\n")
     teil, teil_chars, total_chars, docs, sample_written = 0, 0, 0, 0, 0
-    out = (raw / f"teil_{teil:05d}.jsonl").open("w", encoding="utf-8")
+    out = (raw / f"teil_{teil:05d}.jsonl").open("w", encoding="utf-8", newline="\n")
     t0 = time.time()
     last_print = 0.0
     try:
@@ -141,7 +141,7 @@ def download(source: str, work: Path, max_chars: int, sample_chars: int = 300_00
                 out.close()
                 teil += 1
                 teil_chars = 0
-                out = (raw / f"teil_{teil:05d}.jsonl").open("w", encoding="utf-8")
+                out = (raw / f"teil_{teil:05d}.jsonl").open("w", encoding="utf-8", newline="\n")
             now = time.time()
             if now - last_print > 5:
                 last_print = now
@@ -202,7 +202,9 @@ def tokenize(work: Path, tok_path: Path, workers: Optional[int] = None, val_ever
     tok = Tokenizer(tok_path)
     if tok.vocab_size > 65535:
         raise SystemExit("Vokabular zu gross fuer uint16-Speicherung.")
-    workers = workers or max(1, (os.cpu_count() or 2) - 1)
+    # Jeder Prozess haelt eine ~100-MB-Rohdatei im Speicher; mehr als 6 lohnt sich
+    # kaum und kann bei 16 GB RAM knapp werden.
+    workers = workers or max(1, min(6, (os.cpu_count() or 2) - 1))
     n_train = n_val = n_docs = 0
     t0 = time.time()
     with open(work / "train.bin", "wb") as ftrain, open(work / "val.bin", "wb") as fval:

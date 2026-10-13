@@ -491,3 +491,36 @@ def test_extend_from_stable_checkpoint(work, trained):
     train(cfg, tc, data.batch, trained, trained / "tokenizer.model", torch.device("cpu"), extend=True)
     ck = torch.load(trained / "ckpt.pt", weights_only=False)
     assert ck["step"] == 2 * stable["train_cfg"]["max_steps"]
+
+
+def test_tokenizer_ignores_windows_line_endings(tmp_path):
+    src = tmp_path / "s.txt"
+    src.write_bytes(("Das ist ein Satz.\r\nNoch ein Satz, mit Komma.\r\n" * 3000).encode("utf-8"))
+    path = train_tokenizer([src], tmp_path / "tok", vocab_size=400, threads=2)
+    t = Tokenizer(path)
+    assert not any("\r" in t.id_to_piece(i) for i in range(t.vocab_size))
+
+
+def test_extend_with_hours_is_not_capped_by_steps(work, tok, tmp_path):
+    cfg = replace(TINY, vocab_size=tok.vocab_size)
+    tc = TrainConfig(micro_batch=4, grad_accum=1, lr=1e-3, warmup_steps=5, max_steps=60, eval_every=10**9,
+                     eval_batches=2, save_every=10**9, sample_every=10**9, log_every=10**9)
+    data = TokenData(work, cfg.max_seq_len)
+    out = tmp_path / "m"
+    train(cfg, tc, data.batch, out, work / "tokenizer.model", torch.device("cpu"), hours=1.0)
+    assert torch.load(out / "ckpt.pt", weights_only=False)["step"] == 60  # Schrittgrenze griff zuerst
+    log_lines = len((out / "vortraining_log.csv").read_text().splitlines())
+    train(cfg, tc, data.batch, out, work / "tokenizer.model", torch.device("cpu"), hours=0.0015, extend=True)
+    assert torch.load(out / "ckpt.pt", weights_only=False)["step"] > 60
+    assert len((out / "vortraining_log.csv").read_text().splitlines()) >= log_lines  # Log nicht geloescht
+
+
+def test_dashboard_reads_status_and_log(trained):
+    from llm.dashboard import find_runs, read_log
+
+    runs = find_runs(trained.parent)
+    assert any(r["ordner"] == trained.name for r in runs)
+    st = json.loads((trained / "status.json").read_text(encoding="utf-8"))
+    assert st["fertig"] and st["schritt"] > 0
+    log = read_log(trained / st["log"])
+    assert log["train"] and log["val"]

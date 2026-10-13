@@ -20,6 +20,8 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from .system import wach_bleiben
+
 OLLAMA_URL = "http://localhost:11434"
 
 THEMEN = [
@@ -201,7 +203,7 @@ def run(out_path: Path, model: Optional[str] = None, anzahl: Optional[int] = Non
     t0 = time.time()
     neu = verworfen = 0
     try:
-        with out_path.open("a", encoding="utf-8") as f:
+        with wach_bleiben(), out_path.open("a", encoding="utf-8") as f:
             for i, (thema, aufgabe, k) in enumerate(jobs):
                 if anzahl and neu >= anzahl:
                     break

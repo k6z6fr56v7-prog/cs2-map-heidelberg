@@ -1,6 +1,5 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-start "" http://localhost:8800
-".venv\Scripts\python.exe" -m llm web --modell arbeit\chat_klein --name "Eigen-LM"
+".venv\Scripts\python.exe" -m llm web --modell arbeit\chat_klein --name "Eigen-LM" --oeffnen
 pause

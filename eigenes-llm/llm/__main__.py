@@ -10,6 +10,7 @@ Befehle (in der ueblichen Reihenfolge):
     sft           Chat-Fine-Tuning (macht aus dem Textmodell einen Assistenten)
     chat          Im Terminal chatten
     web           Chat im Browser
+    dashboard     Live-Fortschritt des Trainings (auch vom Handy)
     export        Nach GGUF exportieren fuer Ollama / LM Studio
 
 Einzelschritte von 'vorbereiten':  daten, tokenizer, tokenisieren
@@ -55,7 +56,7 @@ def cmd_info(args) -> None:
         print(f"  Leistung    ~{tflops:.1f} TFLOPS (fp32-Matrixmultiplikation)")
     else:
         print("  CUDA        NEIN - es wird nur die CPU genutzt.")
-        print("              Loesung: setup_windows.ps1 ausfuehren (installiert PyTorch mit CUDA).")
+        print("              Loesung: 1_installieren.bat erneut ausfuehren (installiert PyTorch mit CUDA).")
     work = Path(args.arbeit)
     free = shutil.disk_usage(work if work.exists() else Path.cwd()).free / 2**30
     print(f"  Speicher    {free:.0f} GB frei im Arbeitsordner")
@@ -236,6 +237,12 @@ def _auto_bewertung(out: Path, work: Path) -> None:
         print(f"  (Deutsch-Test uebersprungen: {e})")
 
 
+def cmd_dashboard(args) -> None:
+    from .dashboard import serve
+
+    serve(Path(args.arbeit), port=args.port, network=args.netzwerk, open_browser=args.oeffnen)
+
+
 def cmd_lehrer(args) -> None:
     from .lehrer import run
 
@@ -284,7 +291,7 @@ def cmd_chat(args) -> None:
 def cmd_web(args) -> None:
     from .web import serve
 
-    serve(Path(args.modell), port=args.port, system=args.system, name=args.name)
+    serve(Path(args.modell), port=args.port, system=args.system, name=args.name, open_browser=args.oeffnen)
 
 
 def cmd_export(args) -> None:
@@ -395,6 +402,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--geraet", default=None)
     sp.set_defaults(fn=cmd_sft)
 
+    sp = sub.add_parser("dashboard", help="Live-Fortschritt des Trainings im Browser")
+    sp.add_argument("--port", type=int, default=8900)
+    sp.add_argument("--netzwerk", action="store_true", help="Auch im WLAN erreichbar (z.B. vom Handy)")
+    sp.add_argument("--oeffnen", action="store_true", help="Browser automatisch oeffnen")
+    sp.set_defaults(fn=cmd_dashboard)
+
     sp = sub.add_parser("bewerten", help="Deutsch-Test: Modelle vergleichen")
     sp.add_argument("--modell", action="append", required=True, help="Modellordner (mehrfach fuer Vergleich)")
     sp.add_argument("--ohne-perplexitaet", dest="ohne_perplexitaet", action="store_true")
@@ -422,6 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--port", type=int, default=8800)
     sp.add_argument("--name", default="Eigen-LM")
     sp.add_argument("--system", default=None)
+    sp.add_argument("--oeffnen", action="store_true", help="Browser automatisch oeffnen")
     sp.set_defaults(fn=cmd_web)
 
     sp = sub.add_parser("export", help="Export nach GGUF / Ollama")
